@@ -13,5 +13,6 @@ struct GamebookParserApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.automatic)
     }
 }
