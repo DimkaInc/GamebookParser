@@ -39,16 +39,14 @@ struct ContentView: View {
         ) { result in
             switch result {
             case .success:
-                print("JSON exported")
+                print(Text("json_exported_success"))
             case .failure(let error):
-                print(error)
+                print(Text("file_export_error"), error.localizedDescription)
             }
         }
     }
-}
 
 // MARK: - SIDEBAR
-extension ContentView {
     var sidebarView: some View {
         VStack(spacing: 0) {
             headerButtons
@@ -59,19 +57,17 @@ extension ContentView {
             Divider()
             validationPanel
         }
-        .navigationTitle("Gamebook Parser")
+        .navigationTitle(Text("program_title"))
     }
-}
 
 // MARK: - HEADER BUTTONS
-extension ContentView {
     var headerButtons: some View {
         VStack(spacing: 12) {
             Button {
                 showImporter = true
             } label: {
                 Label(
-                    "Open TXT",
+                    String(localized: "open_txt"),
                     systemImage: "folder"
                 )
             }
@@ -80,19 +76,19 @@ extension ContentView {
                 showExporter = true
             } label: {
                 Label(
-                    "Export JSON",
+                    String(localized: "export_json"),
                     systemImage: "square.and.arrow.down"
                 )
             }
             .buttonStyle(.bordered)
             if !vm.sourceFileName.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Source File")
+                    Text("source_file")
                         .font(.caption)
                     Text(vm.sourceFileName)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Export")
+                    Text("export")
                         .font(.caption)
                     Text(vm.exportFileName + ".json")
                         .font(.caption2)
@@ -103,24 +99,20 @@ extension ContentView {
         }
         .padding()
     }
-}
 
 // MARK: - SEARCH FIELD
-extension ContentView {
     var searchField: some View {
         VStack {
             TextField(
-                "Search pages...",
+                String(localized: "search_pages"),
                 text: $searchText
             )
             .textFieldStyle(.roundedBorder)
         }
         .padding()
     }
-}
 
 // MARK: - PAGES LIST
-extension ContentView {
     var pagesList: some View {
         List(
             filteredPages,
@@ -151,7 +143,7 @@ extension ContentView {
     @ViewBuilder
     private func pageRow(_ pageID: Int) -> some View {
         HStack {
-            Text("Page \(pageID)")
+            Text(String(format: NSLocalizedString("page", comment: ""), pageID))
             Spacer()
             if vm.hasValidationIssue(pageID) {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -159,18 +151,16 @@ extension ContentView {
             }
         }
     }
-}
 
 // MARK: - VALIDATION PANEL
-extension ContentView {
     var validationPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Validation")
+                Text("validation")
                     .font(.headline)
                 if vm.validationIssues.isEmpty {
                     Label(
-                        "No issues",
+                        String(localized:"no_issues"),
                         systemImage: "checkmark.circle.fill"
                     )
                     .foregroundStyle(.green)
@@ -197,12 +187,12 @@ extension ContentView {
                 )
                 Text(
                     issue.severity == .error
-                    ? "ERROR"
-                    : "WARNING"
+                    ? "error"
+                    : "wsrning"
                 )
                 .bold()
             }
-            Text("Page: \(issue.page)")
+            Text(String(format: NSLocalizedString("page", comment: ""), issue.page))
             Text(issue.message)
                 .font(.caption)
         }
@@ -215,10 +205,8 @@ extension ContentView {
         )
         .cornerRadius(12)
     }
-}
 
 // MARK: - DETAIL VIEW
-extension ContentView {
     var detailView: some View {
         Group {
             if let book = vm.book {
@@ -233,31 +221,27 @@ extension ContentView {
             }
         }
     }
-}
 
 // MARK: - EMPTY STATE
-extension ContentView {
     var emptyState: some View {
         VStack(spacing: 20) {
             Image(systemName: "book.closed")
                 .font(.system(size: 80))
-            Text("Open TXT gamebook")
+            Text("open_txt")
                 .font(.largeTitle)
             Button {
                 showImporter = true
             } label: {
                 Label(
-                    "Open File",
+                    String(localized: "open_txt"),
                     systemImage: "folder"
                 )
             }
             .buttonStyle(.borderedProminent)
         }
     }
-}
 
 // MARK: - EDITOR TAB
-extension ContentView {
     @ViewBuilder
     func editorTab(
         _ book: Book
@@ -282,10 +266,8 @@ extension ContentView {
             Text("Select page")
         }
     }
-}
 
 // MARK: - GRAPH TAB
-extension ContentView {
     func graphTab(
         _ book: Book
     ) -> some View {
@@ -299,10 +281,8 @@ extension ContentView {
                 )
             }
     }
-}
 
 // MARK: - JSON TAB
-extension ContentView {
     var jsonTab: some View {
         ScrollView {
             Text(vm.jsonOutput)
@@ -321,10 +301,8 @@ extension ContentView {
             )
         }
     }
-}
 
 // MARK: - STATISTICS TAB
-extension ContentView {
     func statisticsTab(
         _ book: Book
     ) -> some View {
@@ -372,10 +350,10 @@ extension ContentView {
         .background(Color.gray.opacity(0.12))
         .cornerRadius(16)
     }
-}
+
 
 // MARK: - PAGE BINDING
-extension ContentView {
+
     func bindingForPage(
         _ pageID: Int
     ) -> Binding<Page>? {
@@ -395,4 +373,8 @@ extension ContentView {
             }
         )
     }
+}
+
+#Preview {
+    ContentView()
 }

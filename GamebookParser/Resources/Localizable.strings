@@ -1,0 +1,14 @@
+"json_exported_success" = "JSON экспортирован";
+"file_import_error" = "Ошибка импорта файла: %@";
+"file_export_error" = "Ошибка экспорта файла: %@";
+"program_title" = "Анализатор книг-игр";
+"open_txt" = "Открыть книгу";
+"export_json" = "Сохранить JSON";
+"source_file" = "Исходный файл";
+"export" = "Сохранить";
+"search_pages" = "Поиск страницы...";
+"page" = "Страница %@";
+"validation" = "Проверка";
+"no_issues" = "Ошибок нет";
+"error" = "ОШИБКА";
+"warning" = "ПРЕДУПРЕЖДЕНИЕ";
