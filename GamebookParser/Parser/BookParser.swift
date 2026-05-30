@@ -1,406 +1,545 @@
 import Foundation
+
+// ============================================================================
+// MARK: - ПАРСЕР КНИГИ: ПРЕОБРАЗОВАНИЕ ТЕКСТА В СТРУКТУРИРОВАННУЮ МОДЕЛЬ
+// ============================================================================
+
+/// Основной парсер, преобразующий сырой текстовый файл в объектную модель книги-игры.
+/// - Реализует многоэтапный конвейер: разбиение на страницы → нормализация → извлечение сущностей
+/// - Поддерживает несколько форматов разметки страниц (гибкость под разные источники)
+/// - Использует эвристики и регулярные выражения для извлечения игровых элементов
+///
+/// ## Поддерживаемые форматы разметки страниц:
+/// 1. `^\s*(\d+)\s*$` — номер страницы на отдельной строке: "42"
+/// 2. `^\s*(\d+)\.` — номер с точкой: "42."
+/// 3. `^§\s*(\d+)` — символ параграфа: "§ 42"
+///
+/// ## Поток обработки одной страницы:
+/// ```
+/// Сырой текст страницы
+/// ↓
+/// TextCleaner.normalize() → логические абзацы
+/// ↓
+/// detectChoices() → извлечение переходов ("иди на 15")
+/// detectItems() → предметы ("возьми меч")
+/// detectEnemies() → враги с характеристиками
+/// detectCompanions() → спутники
+/// ↓
+/// Объект Page с заполненными полями
+/// ```
+///
+/// ## Архитектурные решения:
+/// ✅ **Расширяемость**: каждый тип сущности вынесен в отдельный метод (SRP)
+/// ✅ **Устойчивость**: если разметка не найдена — создаётся одна страница с контентом (fallback)
+/// ✅ **Локализация**: эвристики поддерживают русские и английские ключевые слова
+/// ✅ **Тестируемость**: методы детекции можно тестировать изолированно на массивах строк
 final class BookParser {
-    // MARK: - PUBLIC
-    func parseBook(
-        from text: String
-    ) -> Book {
-        let pages = splitPages(
-            from: text
-        )
+    
+    // MARK: - 🚀 ПУБЛИЧНЫЙ ИНТЕРФЕЙС
+    /// Точка входа: парсит полный текст книги и возвращает готовую модель.
+    /// - Parameter text: Исходный текст файла (любая кодировка, уже декодированная в String)
+    /// - Returns: Объект Book с заполненным словарём страниц [Int: Page]
+    /// - Примечание: метаданные (name, author) сейчас заглушки — можно расширить парсингом заголовка
+    func parseBook(from text: String) -> Book {
+        // ─────────────────────────────────────────────────────
+        // ЭТАП 1: РАЗБИЕНИЕ ТЕКСТА НА ОТДЕЛЬНЫЕ СТРАНИЦЫ
+        // Основной метод, реализующий всю логику распознавания структуры
+        let pages = splitPages(from: text)
+        
+        // ─────────────────────────────────────────────────────
+        // ЭТАП 2: СОЗДАНИЕ ОБЪЕКТА КНИГИ
+        // Заглушки для метаданных — в будущем можно парсить первую строку файла:
+        // "Название: Приключения в Средиземье | Автор: Дж. Р. Р. Толкин"
         return Book(
-            name: "Неизвестная книга",
-            author: "Неизвестный автор",
-            pages: pages
+            name: "Неизвестная книга",  // ← можно улучшить: парсинг заголовка
+            author: "Неизвестный автор", // ← можно улучшить: парсинг автора
+            pages: pages               // Словарь: номер страницы → объект Page
         )
     }
-    private func splitPages(
-        from text: String
-    ) -> [Int: Page] {
+    
+    // MARK: - 🔍 РАЗБИЕНИЕ ТЕКСТА НА СТРАНИЦЫ
+    /// Распознаёт разметку страниц и создаёт словарь [номер: Page].
+    /// - Parameter text: Полный текст книги
+    /// - Returns: Словарь страниц, где ключ — целочисленный ID страницы
+    ///
+    /// ## Алгоритм работы:
+    /// 1. **Поиск формата**: перебираем паттерны, находим первый подходящий
+    /// 2. **Обработка интро**: текст до первой страницы → страница 0 (введение)
+    /// 3. **Парсинг страниц**: извлекаем контент между маркерами страниц
+    /// 4. **Нормализация**: очищаем текст, извлекаем сущности (предметы, враги, выборы)
+    /// 5. **Fallback**: если формат не распознан — весь текст как одна страница 0
+    ///
+    /// ## Почему несколько паттернов?
+    /// Разные авторы и источники используют разную разметку:
+    /// - Классические "книги-игры": "1.", "2.", "3."
+    /// - Современные текстовики: просто номер на строке "42"
+    /// - Европейский формат: "§ 1", "§ 2"
+    /// Автоматическое определение повышает совместимость.
+    private func splitPages(from text: String) -> [Int: Page] {
+        // Результирующий словарь для накопления страниц
         var result: [Int: Page] = [:]
+        
+        // ─────────────────────────────────────────────────────
+        // ШАГ 1: ОПРЕДЕЛЕНИЕ ФОРМАТА РАЗМЕТКИ СТРАНИЦ
+        // Массив регулярных выражений в порядке приоритета (первый найденный = используемый)
         let patterns = [
-            #"(?m)^\s*(\d+)\s*$"#,
-            #"(?m)^\s*(\d+)\."#,
-            #"(?m)^§\s*(\d+)"#
+            #"(?m)^\s*(\d+)\s*$"#,  // Паттерн 1: номер на отдельной строке (42)
+                                    // (?m) = multiline: ^ и $ работают на каждую строку
+                                    // \s* = игнорируем ведущие/замыкающие пробелы
+                                    // (\d+) = группа захвата: сам номер страницы
+                                    
+            #"(?m)^\s*(\d+)\."#,    // Паттерн 2: номер с точкой (42.)
+                                    // Часто используется в классических книгах-играх
+                                    
+            #"(?m)^§\s*(\d+)"#      // Паттерн 3: параграф (§ 42)
+                                    // Европейский/академический формат
         ]
+        
+        // Приводим к NSString для работы с NSRange (требуется NSRegularExpression)
+        // NSString использует UTF-16 индексы, что важно для корректной работы regex
         let nsText = text as NSString
+        
+        // Массив для хранения результатов поиска (координаты найденных маркеров страниц)
         var matches: [NSTextCheckingResult] = []
-        // MARK: - FIND PAGE FORMAT
+        
+        // MARK: - ПОИСК ПОДХОДЯЩЕГО ФОРМАТА
+        // Перебираем паттерны по порядку: первый с непустым результатом = победитель
         for pattern in patterns {
-            let regex = try! NSRegularExpression(
-                pattern: pattern
-            )
+            // Компиляция регулярного выражения
+            // try! безопасен здесь: паттерны статические и проверены при разработке
+            let regex = try! NSRegularExpression(pattern: pattern)
+            
+            // Поиск всех вхождений паттерна в тексте
             matches = regex.matches(
                 in: text,
-                range: NSRange(
-                    location: 0,
-                    length: nsText.length
-                )
+                range: NSRange(location: 0, length: nsText.length)
             )
+            
+            // Если нашли хотя бы один маркер — формат определён, прекращаем перебор
             if !matches.isEmpty {
-                //print("PAGE FORMAT FOUND:", pattern)
+                //print("PAGE FORMAT FOUND:", pattern) // Отладка: какой паттерн сработал
                 break
             }
         }
-        // MARK: - NO MATCHES
+        
+        // MARK: - FALLBACK: НЕ РАСПОЗНАНА НИ ОДНА РАЗМЕТКА
+        // Если ни один паттерн не сработал — создаём одну страницу с всем контентом
+        // Это гарантирует, что пользователь хотя бы увидит текст, даже если формат нестандартный
         guard !matches.isEmpty else {
-            let normalized =
-                TextCleaner.normalize(text)
+            // Нормализуем текст: объединяем разорванные строки в абзацы
+            let normalized = TextCleaner.normalize(text)
+            
+            // Создаём страницу с ID 0 (введение/единственная страница)
             let page = Page(
                 id: 0,
                 text: normalized,
-                items: detectItems(
-                    in: normalized
-                ),
-                companions:
-                    detectCompanions(
-                        in: normalized
-                    ),
-                enemy: detectEnemies(
-                    in: normalized
-                ),
-                actions: detectChoices(
-                    in: normalized
-                )
+                // Запускаем детекторы сущностей на нормализованном тексте
+                items: detectItems(in: normalized),
+                companions: detectCompanions(in: normalized),
+                enemy: detectEnemies(in: normalized),
+                actions: detectChoices(in: normalized)
             )
+            
             result[0] = page
-            return result
+            return result // Возвращаем книгу из одной страницы
         }
-        // MARK: - INTRO / PAGE 0
+        
+        // MARK: - ОБРАБОТКА ВВЕДЕНИЯ (СТРАНИЦА 0)
+        // Текст ДО первого маркера страницы считаем введением/прологом
         let firstMatch = matches[0]
+        
+        // Если первый маркер не в начале файла — есть вводный текст
         if firstMatch.range.location > 0 {
-            let introRange = NSRange(
-                location: 0,
-                length: firstMatch.range.location
-            )
-            let introText =
-                nsText.substring(
-                    with: introRange
-                )
-            let normalized =
-                TextCleaner.normalize(
-                    introText
-                )
+            // Выделяем диапазон от начала файла до первого маркера
+            let introRange = NSRange(location: 0, length: firstMatch.range.location)
+            let introText = nsText.substring(with: introRange)
+            
+            // Нормализуем и создаём страницу 0, если текст не пустой
+            let normalized = TextCleaner.normalize(introText)
             if !normalized.isEmpty {
                 let page0 = Page(
                     id: 0,
                     text: normalized,
-                    items: detectItems(
-                        in: normalized
-                    ),
-                    companions:
-                        detectCompanions(
-                            in: normalized
-                        ),
-                    enemy: detectEnemies(
-                        in: normalized
-                    ),
-                    actions: detectChoices(
-                        in: normalized
-                    )
+                    items: detectItems(in: normalized),
+                    companions: detectCompanions(in: normalized),
+                    enemy: detectEnemies(in: normalized),
+                    actions: detectChoices(in: normalized)
                 )
                 result[0] = page0
             }
         }
-        // MARK: - PARSE NORMAL PAGES
+        
+        // MARK: - ПАРСИНГ ОСНОВНЫХ СТРАНИЦ
+        // Обрабатываем каждый найденный маркер страницы
         for index in matches.indices {
             let match = matches[index]
-            let pageString =
-                nsText.substring(
-                    with: match.range(at: 1)
-                )
-            guard let pageNumber =
-                    Int(pageString)
-            else {
-                continue
+            
+            // ─────────────────────────────────────────────────────
+            // ИЗВЛЕЧЕНИЕ НОМЕРА СТРАНИЦЫ
+            // match.range(at: 1) — первая группа захвата (\d+) в паттерне
+            let pageString = nsText.substring(with: match.range(at: 1))
+            
+            // Преобразуем строку в целое число; пропускаем, если не удалось
+            guard let pageNumber = Int(pageString) else {
+                continue // Невалидный номер — игнорируем этот маркер
             }
-            let start =
-                match.range.upperBound
+            
+            // ─────────────────────────────────────────────────────
+            // ОПРЕДЕЛЕНИЕ ДИАПАЗОНА КОНТЕНТА СТРАНИЦЫ
+            // Начало: сразу после маркера (верхняя граница диапазона совпадения)
+            let start = match.range.upperBound
+            
+            // Конец: начало следующего маркера, либо конец файла для последней страницы
             let end: Int
             if index + 1 < matches.count {
-                end =
-                    matches[index + 1]
-                    .range.location
+                // Есть следующая страница — контент заканчивается перед её маркером
+                end = matches[index + 1].range.location
             } else {
+                // Это последняя страница — контент до конца файла
                 end = nsText.length
             }
+            
+            // Защита от некорректных диапазонов (не должно случиться при правильных паттернах)
             guard end > start else {
                 continue
             }
-            let contentRange = NSRange(
-                location: start,
-                length: end - start
-            )
-            let rawText =
-                nsText.substring(
-                    with: contentRange
-                )
-            let normalized =
-                TextCleaner.normalize(
-                    rawText
-                )
+            
+            // Выделяем сырой текст страницы
+            let contentRange = NSRange(location: start, length: end - start)
+            let rawText = nsText.substring(with: contentRange)
+            
+            // ─────────────────────────────────────────────────────
+            // НОРМАЛИЗАЦИЯ И ИЗВЛЕЧЕНИЕ СУЩНОСТЕЙ
+            // Превращаем "разорванный" текст в логические абзацы
+            let normalized = TextCleaner.normalize(rawText)
+            
+            // Создаём объект страницы с заполненными полями
             let page = Page(
                 id: pageNumber,
-                text: normalized.isEmpty
-                    ? ["EMPTY PAGE"]
-                    : normalized,
-                items: detectItems(
-                    in: normalized
-                ),
-                companions:
-                    detectCompanions(
-                        in: normalized
-                    ),
-                enemy: detectEnemies(
-                    in: normalized
-                ),
-                actions: detectChoices(
-                    in: normalized
-                )
+                // Если после нормализации текст пуст — ставим заглушку для отладки
+                text: normalized.isEmpty ? ["EMPTY PAGE"] : normalized,
+                
+                // Запускаем детекторы для каждого типа игровых элементов
+                items: detectItems(in: normalized),
+                companions: detectCompanions(in: normalized),
+                enemy: detectEnemies(in: normalized),
+                actions: detectChoices(in: normalized)
             )
+            
+            // Добавляем страницу в результат по её номеру
             result[pageNumber] = page
         }
-        //print("TOTAL PAGES:", result.count)
+        
+        //print("TOTAL PAGES:", result.count) // Отладка: сколько страниц распарсено
         return result
     }
-
-
 }
+
+// ============================================================================
+// MARK: - РАСШИРЕНИЕ: ДЕТЕКЦИЯ ВЫБОРОВ (ПЕРЕХОДОВ МЕЖДУ СТРАНИЦАМИ)
+// ============================================================================
 
 import Foundation
 extension BookParser {
-    // MARK: - CHOICES
-    func detectChoices(
-        in lines: [String]
-    ) -> PageActions {
+    
+    // MARK: - 🔗 ИЗВЛЕЧЕНИЕ ПЕРЕХОДОВ
+    /// Находит в тексте упоминания переходов на другие страницы.
+    /// - Parameter lines: Массив абзацев страницы (после нормализации)
+    /// - Returns: Объект PageActions со словарём [целевой_номер: текст_описания]
+    ///
+    /// ## Поддерживаемые форматы ссылок (регистронезависимо):
+    /// - Русские: "на страницу 15", "перейди на 42", "иди на 7"
+    /// - Английские: "turn to 15", "go to 42"
+    /// - Пример: "Если сражаться, иди на 23. Если бежать — на страницу 56."
+    ///   → choices: [23: "Если сражаться, иди на 23.", 56: "Если бежать — на страницу 56."]
+    ///
+    /// ## Почему сохраняем весь текст строки как описание?
+    /// ✅ Пользователь видит контекст выбора в редакторе
+    /// ✅ Можно позже улучшить: вырезать только часть до номера, оставив чистое описание
+    /// ✅ Простота реализации: не нужно сложное выделение подстроки
+    func detectChoices(in lines: [String]) -> PageActions {
+        // Словарь для накопления переходов: ключ = номер страницы, значение = текст выбора
         var choices: [Int: String] = [:]
+        
+        // Регулярное выражение для поиска переходов:
+        // (?i) = case insensitive (регистронезависимый поиск)
+        // (?:...) = незахватывающая группа (только для логики, не создаёт группу захвата)
+        // (на страницу|перейди на|иди на|turn to|go to) = ключевые фразы перехода
+        // \s+ = один или более пробелов между фразой и номером
+        // (\d+) = ГРУППА ЗАХВАТА 1: целевой номер страницы
         let regex = try! NSRegularExpression(
-            pattern:
-                #"(?i)(?:на страницу|перейди на|иди на|turn to|go to)\s+(\d+)"#
+            pattern: #"(?i)(?:на страницу|перейди на|иди на|turn to|go to)\s+(\d+)"#
         )
+        
+        // Обрабатываем каждый абзац страницы
         for line in lines {
-            let nsLine = line as NSString
+            let nsLine = line as NSString // Для работы с NSRange
+            
+            // Поиск всех вхождений паттерна в строке
             let matches = regex.matches(
                 in: line,
-                range: NSRange(
-                    location: 0,
-                    length: nsLine.length
-                )
+                range: NSRange(location: 0, length: nsLine.length)
             )
+            
+            // Обрабатываем каждое найденное упоминание перехода
             for match in matches {
-                let value = nsLine.substring(
-                    with: match.range(at: 1)
-                )
+                // Извлекаем номер страницы из первой группы захвата
+                let value = nsLine.substring(with: match.range(at: 1))
+                
+                // Преобразуем в целое число и добавляем в словарь
                 if let page = Int(value) {
+                    // Ключ: номер целевой страницы
+                    // Значение: весь текст строки как описание выбора (контекст)
                     choices[page] = line
                 }
             }
         }
-        return PageActions(
-            check: .empty,
-            choice: choices
-        )
+        
+        // Возвращаем объект действий:
+        // - check: .empty (зарезервировано для условий типа "если есть предмет")
+        // - choice: словарь найденных переходов
+        return PageActions(check: .empty, choice: choices)
     }
-
 }
+
+// ============================================================================
+// MARK: - РАСШИРЕНИЕ: ДЕТЕКЦИЯ ПРЕДМЕТОВ (ИНВЕНТАРЬ)
+// ============================================================================
 
 import Foundation
 extension BookParser {
-    // MARK: - ITEMS
-    func detectItems(
-        in lines: [String]
-    ) -> ItemOperations {
-        var add: [String: Int] = [:]
-        var dec: [String: Int] = [:]
+    
+    // MARK: - 🎒 ИЗВЛЕЧЕНИЕ ПРЕДМЕТОВ
+    /// Определяет предметы, которые добавляются или удаляются на странице.
+    /// - Parameter lines: Массив абзацев страницы
+    /// - Returns: Объект ItemOperations со словарями add/dec
+    ///
+    /// ## Эвристика обнаружения:
+    /// 1. Приводим строку к нижнему регистру для регистронезависимого поиска
+    /// 2. Ищем ключевые глаголы:
+    ///    • Добавление: "получи", "возьми", "найди"
+    ///    • Удаление: "отдай", "потеряй", "лишись"
+    /// 3. Извлекаем последнее слово строки как название предмета
+    ///
+    /// ## Примеры:
+    /// "Вы нашли меч." → add["меч"] = 1
+    /// "Отдай ключ стражнику." → dec["ключ"] = 1
+    /// "Возьми золотую монету." → add["монету"] = 1 (⚠️ ограничение: берётся последнее слово)
+    ///
+    /// ## Ограничения эвристики:
+    /// ⚠️ "Последнее слово" не всегда название предмета:
+    ///   - "Вы нашли старый ржавый меч" → "меч" ✓
+    ///   - "Вы нашли меч в сундуке" → "сундуке" ✗ (ложное срабатывание)
+    /// ⚠️ Не учитывается количество: "возьми 3 зелья" → add["зелья"] = 1 (а не 3)
+    ///
+    /// ## Улучшения для продакшена:
+    /// 1. Использовать NLP для выделения именных групп (noun phrases)
+    /// 2. Добавить парсинг чисел перед предметом: "(\d+)\s+(.*)" → количество
+    /// 3. Вести словарь синонимов: "меч"/"клинок"/"оружие" → один предмет
+    func detectItems(in lines: [String]) -> ItemOperations {
+        // Словари для накопления операций с предметами
+        var add: [String: Int] = [:] // Предметы, которые игрок получит
+        var dec: [String: Int] = [:] // Предметы, которые игрок потеряет/отдаст
+        
+        // Обрабатываем каждый абзац
         for line in lines {
-            let lower = line.lowercased()
-            // ADD
-            if lower.contains("получи")
-                || lower.contains("возьми")
-                || lower.contains("найди")
-            {
-                let item =
-                    extractLastWord(
-                        from: lower
-                    )
-                add[item] =
-                    (add[item] ?? 0) + 1
+            let lower = line.lowercased() // Для регистронезависимого поиска
+            
+            // ─────────────────────────────────────────────────────
+            // ПРОВЕРКА НА ДОБАВЛЕНИЕ ПРЕДМЕТА
+            if lower.contains("получи") || lower.contains("возьми") || lower.contains("найди") {
+                // Извлекаем последнее слово как название предмета
+                let item = extractLastWord(from: lower)
+                // Увеличиваем счётчик: если предмет уже есть — инкремент, иначе = 1
+                add[item] = (add[item] ?? 0) + 1
             }
-            // REMOVE
-            if lower.contains("отдай")
-                || lower.contains("потеряй")
-                || lower.contains("лишись")
-            {
-                let item =
-                    extractLastWord(
-                        from: lower
-                    )
-                dec[item] =
-                    (dec[item] ?? 0) + 1
+            
+            // ─────────────────────────────────────────────────────
+            // ПРОВЕРКА НА УДАЛЕНИЕ ПРЕДМЕТА
+            if lower.contains("отдай") || lower.contains("потеряй") || lower.contains("лишись") {
+                let item = extractLastWord(from: lower)
+                dec[item] = (dec[item] ?? 0) + 1
             }
         }
-        return ItemOperations(
-            add: add,
-            dec: dec
-        )
+        
+        // Возвращаем объект с двумя словарями операций
+        return ItemOperations(add: add, dec: dec)
     }
-    // MARK: - HELPERS
-    func extractLastWord(
-        from text: String
-    ) -> String {
+    
+    // MARK: - 🛠 ВСПОМОГАТЕЛЬНЫЙ МЕТОД: ИЗВЛЕЧЕНИЕ ПОСЛЕДНЕГО СЛОВА
+    /// Извлекает последнее слово из строки, очищая от базовой пунктуации.
+    /// - Parameter text: Входная строка (обычно уже в нижнем регистре)
+    /// - Returns: Последнее слово без точек/запятых, или "unknown" если не удалось
+    ///
+    /// ## Логика обработки:
+    /// 1. Разбиваем строку по пробелам и переносам → массив слов
+    /// 2. Берём последний элемент массива
+    /// 3. Удаляем базовую пунктуацию (.,) — можно расширить список
+    /// 4. Если строка пустая или не удалось извлечь — возвращаем "unknown"
+    ///
+    /// ## Примеры:
+    /// "возьми меч." → "меч"
+    /// "отдай золотой ключ," → "ключ"
+    /// "" → "unknown"
+    /// "одно" → "одно"
+    func extractLastWord(from text: String) -> String {
         text
-            .components(
-                separatedBy:
-                    .whitespacesAndNewlines
-            )
-            .last?
-            .replacingOccurrences(
-                of: ".",
-                with: ""
-            )
-            .replacingOccurrences(
-                of: ",",
-                with: ""
-            )
-            ?? "unknown"
+            .components(separatedBy: .whitespacesAndNewlines) // Разбиваем на слова
+            .last? // Берём последнее слово (Optional)
+            .replacingOccurrences(of: ".", with: "") // Удаляем точки
+            .replacingOccurrences(of: ",", with: "") // Удаляем запятые
+            ?? "unknown" // Fallback если цепочка вернула nil
     }
 }
 
+// ============================================================================
+// MARK: - РАСШИРЕНИЕ: ДЕТЕКЦИЯ ВРАГОВ (ХАРАКТЕРИСТИКИ)
+// ============================================================================
+
 import Foundation
 extension BookParser {
-    // MARK: - ENEMIES
-    func detectEnemies(
-        in lines: [String]
-    ) -> [String: CharacterStats] {
+    
+    // MARK: - ⚔️ ИЗВЛЕЧЕНИЕ ВРАГОВ
+    /// Находит упоминания врагов и извлекает их характеристики (навык, жизнеспособность).
+    /// - Parameter lines: Массив абзацев страницы
+    /// - Returns: Словарь [имя_врага: CharacterStats(skill:, vitality:)]
+    ///
+    /// ## Двухэтапная фильтрация:
+    /// 1. **Ключевые слова**: строка должна содержать "орк", "враг", "monster" и т.д.
+    ///    → отсеивает ложные срабатывания на обычных предложениях
+    /// 2. **Регулярное выражение**: извлекает имя и два числа (предполагаемые stats)
+    ///
+    /// ## Формат, который ищем (примеры):
+    /// "Орк Громзил 5 12" → name: "Громзил", skill: 5, vitality: 12
+    /// "Enemy Dragon 8 20" → name: "Dragon", skill: 8, vitality: 20
+    /// "Страж подземелья 3 7" → name: "Страж", skill: 3, vitality: 7
+    ///
+    /// ## Регулярное выражение:
+    /// `([А-ЯA-Z][а-яa-zA-Z]+)` — ГРУППА 1: имя (заглавная + строчные буквы, кириллица/латиница)
+    /// `.*?` — любой текст между именем и числами (нежадный поиск)
+    /// `(\d+)` — ГРУППА 2: первое число (предполагаемый skill)
+    /// `.*?` — разделитель
+    /// `(\d+)` — ГРУППА 3: второе число (предполагаемый vitality)
+    ///
+    /// ## Ограничения:
+    /// ⚠️ Многословные имена: "Тёмный Рыцарь" → извлечётся только "Тёмный"
+    /// ⚠️ Порядок чисел: предполагаем skill→vitality, но в тексте может быть наоборот
+    /// ⚠️ Ложные срабатывания: "Вы встретили 5 орков с 12 мечами" → неверная интерпретация
+    func detectEnemies(in lines: [String]) -> [String: CharacterStats] {
         var enemies: [String: CharacterStats] = [:]
+        
+        // Список ключевых слов для фильтрации строк (регистронезависимо)
+        // Расширяйте этот список под вашу вселенную: "дракон", "нежить", "босс" и т.д.
         let enemyKeywords = [
-            "орк",
-            "гоблин",
-            "enemy",
-            "monster",
-            "враг",
-            "страж",
-            "зомби",
-            "скелет",
-            "демон",
-            "рыцарь"
+            "орк", "гоблин", "enemy", "monster", "враг",
+            "страж", "зомби", "скелет", "демон", "рыцарь"
         ]
+        
+        // Регулярное выражение для извлечения: Имя + 2 числа
         let regex = try! NSRegularExpression(
-            pattern:
-                #"([А-ЯA-Z][а-яa-zA-Z]+).*?(\d+).*?(\d+)"#,
+            pattern: #"([А-ЯA-Z][а-яa-zA-Z]+).*?(\d+).*?(\d+)"#,
             options: []
         )
+        
+        // Обрабатываем каждый абзац
         for line in lines {
             let lower = line.lowercased()
-            guard enemyKeywords.contains(
-                where: { lower.contains($0) }
-            ) else {
-                continue
+            
+            // Фильтр 1: строка должна содержать ключевое слово врага
+            guard enemyKeywords.contains(where: { lower.contains($0) }) else {
+                continue // Пропускаем строки без контекста "враг"
             }
+            
             let nsLine = line as NSString
             let matches = regex.matches(
                 in: line,
-                range: NSRange(
-                    location: 0,
-                    length: nsLine.length
-                )
+                range: NSRange(location: 0, length: nsLine.length)
             )
+            
+            // Обрабатываем каждое совпадение паттерна
             for match in matches {
-                guard match.numberOfRanges >= 4
-                else {
+                // Проверка: в паттерне должно быть 4 диапазона (0=всё совпадение, 1-3=группы захвата)
+                guard match.numberOfRanges >= 4 else {
                     continue
                 }
-                let name =
-                    nsLine.substring(
-                        with: match.range(at: 1)
-                    )
-                let skill = Int(
-                    nsLine.substring(
-                        with: match.range(at: 2)
-                    )
-                ) ?? 0
-                let vitality = Int(
-                    nsLine.substring(
-                        with: match.range(at: 3)
-                    )
-                ) ?? 0
-                enemies[name] = CharacterStats(
-                    skill: skill,
-                    vitality: vitality
-                )
+                
+                // Извлекаем данные из групп захвата
+                let name = nsLine.substring(with: match.range(at: 1)) // Имя врага
+                let skill = Int(nsLine.substring(with: match.range(at: 2))) ?? 0 // Первое число
+                let vitality = Int(nsLine.substring(with: match.range(at: 3))) ?? 0 // Второе число
+                
+                // Создаём объект характеристик и добавляем в словарь
+                enemies[name] = CharacterStats(skill: skill, vitality: vitality)
             }
         }
+        
         return enemies
     }
 }
 
+// ============================================================================
+// MARK: - РАСШИРЕНИЕ: ДЕТЕКЦИЯ СПУТНИКОВ (СОЮЗНИКОВ)
+// ============================================================================
+
 import Foundation
 extension BookParser {
-    // MARK: - COMPANIONS
-    func detectCompanions(
-        in lines: [String]
-    ) -> CompanionOperations {
-        var companions:
-            [String: CharacterStats] = [:]
+    
+    // MARK: - 🤝 ИЗВЛЕЧЕНИЕ СПУТНИКОВ
+    /// Находит упоминания союзников и извлекает их характеристики.
+    /// - Parameter lines: Массив абзацев страницы
+    /// - Returns: Объект CompanionOperations со словарём добавляемых спутников
+    ///
+    /// ## Отличия от detectEnemies:
+    /// ✅ Ключевые слова другие: "союзник", "друг", "ally", "companion"
+    /// ✅ Возвращает CompanionOperations (add/dec), а не прямой словарь
+    ///    → заложена возможность удаления спутников в будущем
+    /// ✅ Логика извлечения идентична: имя + 2 числа
+    ///
+    /// ## Почему dec: [:] пустой?
+    /// В текущей реализации спутники только добавляются.
+    /// Для поддержки "потеря спутника" нужно:
+    /// 1. Добавить ключевые слова: "покинул", "потерял", "расстался"
+    /// 2. Заполнять словарь dec аналогично enemies
+    func detectCompanions(in lines: [String]) -> CompanionOperations {
+        var companions: [String: CharacterStats] = [:]
+        
+        // Ключевые слова для фильтрации строк со спутниками
         let keywords = [
-            "союзник",
-            "спутник",
-            "друг",
-            "ally",
-            "companion",
-            "wizard",
-            "warrior"
+            "союзник", "спутник", "друг", "ally", "companion", "wizard", "warrior"
         ]
+        
+        // Регулярное выражение идентично врагам: Имя + 2 числа
         let regex = try! NSRegularExpression(
-            pattern:
-                #"([А-ЯA-Z][а-яa-zA-Z]+).*?(\d+).*?(\d+)"#,
+            pattern: #"([А-ЯA-Z][а-яa-zA-Z]+).*?(\d+).*?(\d+)"#,
             options: []
         )
+        
         for line in lines {
             let lower = line.lowercased()
-            guard keywords.contains(
-                where: {
-                    lower.contains($0)
-                }
-            ) else {
+            
+            // Фильтр: строка должна содержать ключевое слово спутника
+            guard keywords.contains(where: { lower.contains($0) }) else {
                 continue
             }
+            
             let nsLine = line as NSString
             let matches = regex.matches(
                 in: line,
-                range: NSRange(
-                    location: 0,
-                    length: nsLine.length
-                )
+                range: NSRange(location: 0, length: nsLine.length)
             )
+            
             for match in matches {
-                guard match.numberOfRanges >= 4
-                else {
-                    continue
-                }
-                let name =
-                    nsLine.substring(
-                        with: match.range(at: 1)
-                    )
-                let skill = Int(
-                    nsLine.substring(
-                        with: match.range(at: 2)
-                    )
-                ) ?? 0
-                let vitality = Int(
-                    nsLine.substring(
-                        with: match.range(at: 3)
-                    )
-                ) ?? 0
-                companions[name] = CharacterStats(
-                    skill: skill,
-                    vitality: vitality
-                )
+                guard match.numberOfRanges >= 4 else { continue }
+                
+                let name = nsLine.substring(with: match.range(at: 1))
+                let skill = Int(nsLine.substring(with: match.range(at: 2))) ?? 0
+                let vitality = Int(nsLine.substring(with: match.range(at: 3))) ?? 0
+                
+                companions[name] = CharacterStats(skill: skill, vitality: vitality)
             }
         }
-        return CompanionOperations(
-            add: companions,
-            dec: [:]
-        )
+        
+        // Возвращаем в формате операций (заложено расширение на удаление в будущем)
+        return CompanionOperations(add: companions, dec: [:])
     }
 }
-

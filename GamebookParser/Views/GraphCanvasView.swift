@@ -1,43 +1,71 @@
 import SwiftUI
+
+// MARK: - ПРЕДСТАВЛЕНИЕ ГРАФА
+/// Canvas-представление для визуализации структуры книги в виде графа.
+/// - Страницы (узлы) располагаются по кругу
+/// - Переходы между страницами (рёбра) отображаются линиями
+/// - Используется низкоуровневый API Canvas для производительной отрисовки
 struct GraphCanvasView: View {
+    /// Модель книги, содержащая страницы и переходы между ними
     let book: Book
-    // MARK: - BODY
+    
+    // MARK: - ОСНОВНОЙ ИНТЕРФЕЙС
     var body: some View {
+        // GeometryReader предоставляет размер доступной области для отрисовки
         GeometryReader { geometry in
+            // Canvas — низкоуровневый контекст для императивной отрисовки
+            // Контекст обновляется только при изменении зависимых данных
             Canvas { context, size in
-                let pages =
-                    book.pages.keys.sorted()
+                // ─────────────────────────────────────────────────────
+                // ПОДГОТОВКА ДАННЫХ
+                // Сортируем ID страниц для предсказуемого порядка обхода
+                let pages = book.pages.keys.sorted()
+                
+                // Радиус узла (страницы) в точках
                 let radius: CGFloat = 28
-                var positions:
-                    [Int: CGPoint] = [:]
-                // NODE POSITIONS
-                for (index, page)
-                    in pages.enumerated()
-                {
+                
+                // Словарь для кэширования позиций: ID страницы → CGPoint
+                // Используется дважды: при отрисовке рёбер и узлов
+                var positions: [Int: CGPoint] = [:]
+                
+                // ─────────────────────────────────────────────────────
+                // РАСЧЁТ ПОЗИЦИЙ УЗЛОВ (CIRCULAR LAYOUT)
+                // Размещаем страницы равномерно по окружности
+                for (index, page) in pages.enumerated() {
+                    // Нормализованный угол: от 0 до 2π радиан
+                    // index / count даёт долю от полного круга
                     let angle =
                         Double(index)
-                        / Double(
-                            max(pages.count, 1)
-                        )
+                        / Double(max(pages.count, 1)) // Защита от деления на 0
                         * Double.pi * 2
+                    
+                    // Вычисляем координаты на окружности:
+                    // - Центр: середина доступной области (size.width/2, size.height/2)
+                    // - Радиус окружности: 35% от меньшей стороны области
+                    // - cos/sin дают смещение по осям X/Y от центра
                     let x =
                         size.width / 2
-                        + cos(angle)
-                        * size.width * 0.35
+                        + cos(angle) * size.width * 0.35
                     let y =
                         size.height / 2
-                        + sin(angle)
-                        * size.height * 0.35
-                    positions[page] =
-                        CGPoint(x: x, y: y)
+                        + sin(angle) * size.height * 0.35
+                    
+                    // Сохраняем рассчитанную позицию для повторного использования
+                    positions[page] = CGPoint(x: x, y: y)
                 }
-                // EDGES
+                
+                // ─────────────────────────────────────────────────────
+                // ОТРИСОВКА РЁБЕР (ПЕРЕХОДОВ)
+                // Рисуем линии ДО узлов, чтобы они были на заднем плане
                 drawEdges(
                     context: context,
                     positions: positions,
                     pages: pages
                 )
-                // NODES
+                
+                // ─────────────────────────────────────────────────────
+                // ОТРИСОВКА УЗЛОВ (СТРАНИЦ)
+                // Рисуем круги и подписи поверх линий
                 drawNodes(
                     context: context,
                     positions: positions,
@@ -49,44 +77,73 @@ struct GraphCanvasView: View {
     }
 }
 
+// MARK: - РАСШИРЕНИЕ С МЕТОДАМИ ОТРИСОВКИ
+// Выносим вспомогательные функции в extension для чистоты основного View
 import SwiftUI
 extension GraphCanvasView {
-    // MARK: - DRAW EDGES
+    
+    // MARK: - ОТРИСОВКА РЁБЕР (ЛИНИЙ ПЕРЕХОДОВ)
+    /// Рисует направленные связи между страницами на основе их переходов.
+    /// - Параметры:
+    ///   - context: Графический контекст Canvas для выполнения команд отрисовки
+    ///   - positions: Предварительно рассчитанные позиции всех узлов
+    ///   - pages: Список ID страниц для итерации
     func drawEdges(
         context: GraphicsContext,
         positions: [Int: CGPoint],
         pages: [Int]
     ) {
+        // Проходим по каждой странице-источнику
         for pageID in pages {
-            guard let page =
-                    book.pages[pageID],
-                  let start =
-                    positions[pageID]
+            // Безопасное извлечение:
+            // 1. Сам объект страницы из книги
+            // 2. Её позиции на канве
+            // Если что-то отсутствует — пропускаем итерацию
+            guard let page = book.pages[pageID],
+                  let start = positions[pageID]
             else {
                 continue
             }
-            for target in page
-                .actions
-                .choice
-                .keys
-            {
-                guard let end =
-                        positions[target]
-                else {
+            
+            // Перебираем все целевые страницы для переходов типа "choice"
+            // (предполагается, что page.actions.choice — словарь [Int: Action])
+            for target in page.actions.choice.keys {
+                // Пропускаем переход, если целевая страница не имеет позиции
+                // (например, ссылается на несуществующий ID)
+                guard let end = positions[target] else {
                     continue
                 }
+                
+                // Создаём и настраиваем путь для линии
                 var path = Path()
-                path.move(to: start)
-                path.addLine(to: end)
+                path.move(to: start)      // Начальная точка: текущая страница
+                path.addLine(to: end)     // Конечная точка: целевая страница
+                
+                // Отрисовываем контур пути:
+                // - цвет: синий (.blue)
+                // - толщина: 2 точки
+                // - стиль: сплошная линия (по умолчанию)
                 context.stroke(
                     path,
                     with: .color(.blue),
                     lineWidth: 2
                 )
+                
+                // 💡 Совет: для направленных графов можно добавить стрелки:
+                // - вычислить угол линии
+                // - нарисовать треугольник в конечной точке
+                // - или использовать context.draw(Image(systemName: "arrowtriangle.right.fill"), ...)
             }
         }
     }
-    // MARK: - DRAW NODES
+    
+    // MARK: - ОТРИСОВКА УЗЛОВ (КРУГОВ СТРАНИЦ)
+    /// Рисует визуальные представления страниц: круги с номерами внутри.
+    /// - Параметры:
+    ///   - context: Графический контекст Canvas
+    ///   - positions: Словарь позиций узлов
+    ///   - radius: Радиус каждого узла в точках
+    ///   - pages: Список ID страниц для отрисовки
     func drawNodes(
         context: GraphicsContext,
         positions: [Int: CGPoint],
@@ -94,28 +151,46 @@ extension GraphCanvasView {
         pages: [Int]
     ) {
         for pageID in pages {
-            guard let point =
-                    positions[pageID]
-            else {
+            // Пропускаем страницу, если для неё не рассчитана позиция
+            guard let point = positions[pageID] else {
                 continue
             }
+            
+            // Вычисляем прямоугольник, ограничивающий круг:
+            // - Левый верхний угол: (x - radius, y - radius)
+            // - Размер: диаметр × диаметр (radius * 2)
             let rect = CGRect(
                 x: point.x - radius,
                 y: point.y - radius,
                 width: radius * 2,
                 height: radius * 2
             )
+            
+            // ─────────────────────────────────────────────────────
+            // ОТРИСОВКА ФОНА УЗЛА (КРУГ)
+            // Создаём эллипс в границах rect и заливаем цветом
             context.fill(
                 Path(ellipseIn: rect),
-                with: .color(.orange)
+                with: .color(.orange) // Цвет узла (можно сделать динамическим)
             )
+            
+            // ─────────────────────────────────────────────────────
+            // ОТРИСОВКА ПОДПИСИ (НОМЕР СТРАНИЦЫ)
+            // Создаём Text-представление и рисуем его в центре узла
             context.draw(
-                Text("\(pageID)")
-                    .font(.caption)
-                    .foregroundColor(.black),
-                at: point
+                Text("\(pageID)")           // Текст: номер страницы
+                    .font(.caption)         // Шрифт: системный, размер caption
+                    .foregroundColor(.black), // Цвет текста: чёрный для контраста
+                at: point                   // Позиция: центр круга
+                // 💡 Важно: Text рисуется центрировано по точке 'at'
+                // Если нужно точное позиционирование — используйте offset
             )
+            
+            // 💡 Идеи для улучшения:
+            // 1. Добавлять иконку ⚠️ если page имеет ошибки валидации
+            // 2. Менять цвет узла в зависимости от типа страницы (начальная, финальная)
+            // 3. Добавлять тень: context.addShadow(...) для глубины
+            // 4. Обрабатывать нажатия: Canvas поддерживает hit-testing через context.hitTest
         }
     }
 }
-
